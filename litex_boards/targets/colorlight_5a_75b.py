@@ -29,15 +29,17 @@ from litex.soc.cores.clock import *
 from litex.soc.integration.soc_core import *
 from litex.soc.integration.builder import *
 
+from litedram.modules import M12L16161A
+from litedram.phy import GENSDRPHY
+
 from liteeth.phy.ecp5rgmii import LiteEthPHYRGMII
-from liteeth.core import LiteEthUDPIPCore
-from liteeth.frontend.etherbone import LiteEthEtherbone
 
 # CRG ----------------------------------------------------------------------------------------------
 
 class _CRG(Module):
     def __init__(self, platform, sys_clk_freq):
-        self.clock_domains.cd_sys = ClockDomain()
+        self.clock_domains.cd_sys    = ClockDomain()
+        self.clock_domains.cd_sys_ps = ClockDomain()
 
         # # #
 
@@ -50,13 +52,17 @@ class _CRG(Module):
         self.submodules.pll = pll = ECP5PLL()
 
         pll.register_clkin(clk25, 25e6)
-        pll.create_clkout(self.cd_sys, sys_clk_freq)
+        pll.create_clkout(self.cd_sys,    sys_clk_freq, phase=11)
+        pll.create_clkout(self.cd_sys_ps, sys_clk_freq, phase=20)
         self.specials += AsyncResetSynchronizer(self.cd_sys, ~pll.locked | ~rst_n)
+
+        # SDRAM clock
+        self.comb += platform.request("sdram_clock").eq(self.cd_sys_ps.clk)
 
 # BaseSoC ------------------------------------------------------------------------------------------
 
 class BaseSoC(SoCCore):
-    def __init__(self, revision, **kwargs):
+    def __init__(self, revision, with_ethernet=False, with_etherbone=False, **kwargs):
         platform     = colorlight_5a_75b.Platform(revision=revision)
         sys_clk_freq = int(125e6)
 
@@ -66,41 +72,39 @@ class BaseSoC(SoCCore):
         # CRG --------------------------------------------------------------------------------------
         self.submodules.crg = _CRG(platform, sys_clk_freq)
 
+        # SDR SDRAM --------------------------------------------------------------------------------
+        if not self.integrated_main_ram_size:
+            self.submodules.sdrphy = GENSDRPHY(platform.request("sdram"), cl=2)
+            self.add_sdram("sdram",
+                phy                     = self.sdrphy,
+                module                  = M12L16161A(sys_clk_freq, "1:1"),
+                origin                  = self.mem_map["main_ram"],
+                size                    = kwargs.get("max_sdram_size", 0x40000000),
+                l2_cache_size           = kwargs.get("l2_size", 8192),
+                l2_cache_min_data_width = kwargs.get("min_l2_data_width", 128),
+                l2_cache_reverse        = True
+            )
+
+        # Ethernet ---------------------------------------------------------------------------------
+        if with_ethernet:
+            self.submodules.ethphy = LiteEthPHYRGMII(
+                clock_pads = self.platform.request("eth_clocks"),
+                pads       = self.platform.request("eth"))
+            self.add_csr("ethphy")
+            self.add_ethernet(phy=self.ethphy)
+
+        # Etherbone --------------------------------------------------------------------------------
+        if with_etherbone:
+            self.submodules.ethphy = LiteEthPHYRGMII(
+                clock_pads = self.platform.request("eth_clocks"),
+                pads       = self.platform.request("eth"))
+            self.add_csr("ethphy")
+            self.add_etherbone(phy=self.ethphy)
+
         # Led --------------------------------------------------------------------------------------
         led_counter = Signal(32)
         self.sync += led_counter.eq(led_counter + 1)
         self.comb += platform.request("user_led_n", 0).eq(led_counter[26])
-
-# EtherboneSoC -------------------------------------------------------------------------------------
-
-class EtherboneSoC(BaseSoC):
-    def __init__(self, eth_phy=0, **kwargs):
-        BaseSoC.__init__(self, **kwargs)
-
-        # Ethernet ---------------------------------------------------------------------------------
-        # phy
-        self.submodules.ethphy = LiteEthPHYRGMII(
-            clock_pads = self.platform.request("eth_clocks", eth_phy),
-            pads       = self.platform.request("eth", eth_phy),
-            tx_delay   = 0e-9, # 0ns FPGA delay (Clk delay added by PHY)
-            rx_delay   = 2e-9) # 2ns FPGA delay to compensate Clk routing to IDDRX1F
-        self.add_csr("ethphy")
-        # core
-        self.submodules.ethcore = LiteEthUDPIPCore(
-            phy         = self.ethphy,
-            mac_address = 0x10e2d5000000,
-            ip_address  = "192.168.1.50",
-            clk_freq    = self.clk_freq)
-        # etherbone
-        self.submodules.etherbone = LiteEthEtherbone(self.ethcore.udp, 1234)
-        self.add_wb_master(self.etherbone.wishbone.bus)
-        # timing constraints
-        self.platform.add_period_constraint(self.ethphy.crg.cd_eth_rx.clk, 1e9/125e6)
-        self.platform.add_period_constraint(self.ethphy.crg.cd_eth_tx.clk, 1e9/125e6)
-        self.platform.add_false_path_constraints(
-            self.crg.cd_sys.clk,
-            self.ethphy.crg.cd_eth_rx.clk,
-            self.ethphy.crg.cd_eth_tx.clk)
 
 # Load ---------------------------------------------------------------------------------------------
 
@@ -129,6 +133,7 @@ def main():
     soc_core_args(parser)
     trellis_args(parser)
     parser.add_argument("--revision", default="7.0", type=str, help="Board revision 7.0 (default) or 6.1")
+    parser.add_argument("--with-ethernet",  action="store_true", help="enable Ethernet support")
     parser.add_argument("--with-etherbone", action="store_true", help="enable Etherbone support")
     parser.add_argument("--eth-phy", default=0, type=int, help="Ethernet PHY 0 or 1 (default=0)")
     parser.add_argument("--load", action="store_true", help="load bitstream")
@@ -137,10 +142,11 @@ def main():
     if args.load:
         load()
 
-    if args.with_etherbone:
-        soc = EtherboneSoC(eth_phy=args.eth_phy, revision=args.revision, **soc_core_argdict(args))
-    else:
-        soc = BaseSoC(args.revision, **soc_core_argdict(args))
+    assert not (args.with_ethernet and args.with_etherbone)
+    soc = BaseSoC(revision=args.revision,
+        with_ethernet  = args.with_ethernet,
+        with_etherbone = args.with_etherbone,
+        **soc_core_argdict(args))
     builder = Builder(soc, **builder_argdict(args))
     builder.build(**trellis_argdict(args))
 
