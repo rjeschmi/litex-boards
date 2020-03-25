@@ -30,10 +30,28 @@ _io = [
     ),
 
     # NET "GMII_RST_N" LOC = R11 | IOSTANDARD = LVCMOS33;
-    ("gmii_rst_n", 0, Pins("R11"), IOStandard("LVCMOS33")),
+    #("gmii_rst_n", 0, Pins("R11"), IOStandard("LVCMOS33")),
 
     # NET "SYSRST_N" LOC = AB14 | IOSTANDARD = LVCMOS33;
     ("cpu_reset", 0, Pins("AB14"), IOStandard("LVCMOS33")),
+    ("eth_clocks", 0,
+        Subsignal("gtx", Pins("AA12")),
+        Subsignal("tx", Pins("Y11")),
+        Subsignal("rx", Pins("AB11")),
+        IOStandard("LVCMOS33")
+    ),
+    ("eth", 0,
+        Subsignal("mdio",    Pins("AA2")),
+        Subsignal("mdc",     Pins("AB6")),
+        Subsignal("rst_n",    Pins("R11")),
+        Subsignal("rx_dv",   Pins("Y7")),
+        Subsignal("rx_er",   Pins("Y8")),
+        Subsignal("rx_data", Pins("Y3 Y4 R9 R7 V9 R8 U9 Y9")),
+	Subsignal("tx_en",   Pins("AA8")),
+	Subsignal("tx_er",   Pins("AB8")),
+        Subsignal("tx_data", Pins("AB2 AB3 AB4 AB7 AB9 AB10 T7 Y10")),
+        IOStandard("LVCMOS33")
+    ),
 
     # NET "DDR2A_CK_P" LOC = H20 | IOSTANDARD = LVCMOS18;
     # NET "DDR2A_CK_N" LOC = J19 | IOSTANDARD = LVCMOS18;

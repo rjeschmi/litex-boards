@@ -9,7 +9,10 @@ from migen.genlib.resetsync import AsyncResetSynchronizer
 
 from litex_boards.platforms import pano_logic_g2
 
+from litex.soc.cores.clock import *
+
 from litex.soc.interconnect import wishbone
+from litex.soc.integration.soc_core import *
 from litex.soc.integration.soc_sdram import *
 from litex.soc.integration.builder import *
 
@@ -19,6 +22,9 @@ from litedram.modules import MT47H32M16
 from litedram.phy import s6ddrphy
 from litedram.core import ControllerSettings
 
+from liteeth.phy.gmii import LiteEthPHYGMII
+from liteeth.core import LiteEthUDPIPCore
+from liteeth.frontend.etherbone import LiteEthEtherbone
 
 #from gateware import info
 #from gateware import cas
@@ -140,18 +146,7 @@ class _CRG(Module):
                                   o_Q=output_clk)
         self.specials += Instance("OBUFDS", i_I=output_clk, o_O=clk.p, o_OB=clk.n)
 
-class BaseSoC(SoCSDRAM):
-    csr_map = {
-            "ddrphy": 0,
-        #"info",
-        #"cas",
-    } 
-    csr_map.update(SoCSDRAM.csr_map)
-
-    mem_map = {
-        "emulator_ram": 0x50000000,  # (default shadow @0xd0000000)
-    }
-    mem_map.update(SoCSDRAM.mem_map)
+class BaseSoC(SoCCore):
 
     def __init__(self, **kwargs):
         if 'integrated_rom_size' not in kwargs:
@@ -160,25 +155,10 @@ class BaseSoC(SoCSDRAM):
             kwargs['integrated_sram_size']=0x8000
 
         platform = pano_logic_g2.Platform()
-        clk_freq = int(50e6)
-        SoCSDRAM.__init__(self, platform, clk_freq, **kwargs)
+        clk_freq = int(125e6)
+        SoCCore.__init__(self, platform, clk_freq, **kwargs)
 
         self.submodules.crg = _CRG(platform)
-        self.platform.add_period_constraint(self.crg.cd_sys.clk, 1e9/clk_freq)
-
-        #self.submodules.info = info.Info(platform, self.__class__.__name__)
-        #self.submodules.cas = cas.ControlAndStatus(platform, clk_freq)
-
-        gmii_rst_n = platform.request("gmii_rst_n")
-
-        self.comb += [
-            gmii_rst_n.eq(1)
-        ]
-
-        if self.cpu_type == "vexriscv" and self.cpu_variant == "linux":
-            size = 0x4000
-            self.submodules.emulator_ram = wishbone.SRAM(size)
-            self.register_mem("emulator_ram", self.mem_map["emulator_ram"], self.emulator_ram.bus, size)
 
         # sdram
         sdram_module = MT47H32M16(self.clk_freq, "1:2")
@@ -188,23 +168,33 @@ class BaseSoC(SoCSDRAM):
             rd_bitslip=0,
             wr_bitslip=4,
             dqs_ddr_alignment="C0")
+        self.add_csr("ddrphy")
         controller_settings = ControllerSettings(with_bandwidth=True)
-        self.register_sdram(self.ddrphy,
-                            sdram_module.geom_settings,
-                            sdram_module.timing_settings,
-                            controller_settings=controller_settings)
-        self.comb += [
-            self.ddrphy.clk4x_wr_strb.eq(self.crg.clk4x_wr_strb),
-            self.ddrphy.clk4x_rd_strb.eq(self.crg.clk4x_rd_strb),
-        ]
+        self.add_sdram ("sdram",
+                phy =       self.ddrphy,
+                module = MT47H32M16(self.clk_freq, "1:2"),
+                origin = self.mem_map["main_ram"],
+                size = kwargs.get("max_sdram_size", 0x40000000),
+                l2_cache_size = kwargs.get("l2_size", 8192),
+                l2_cache_min_data_width = kwargs.get("min_l2_data_width", 128),
+                l2_cache_reverse = True
+                )
+        self.submodules.ethphy = LiteEthPHYGMII(
+            self.platform.request("eth_clocks"),
+            self.platform.request("eth"))
+        self.add_csr("ethphy")
+        self.add_etherbone(phy=self.ethphy)
+
 
 def main():
     parser = argparse.ArgumentParser("LiteX SoC on PanoLogic")
+    parser.add_argument("--with-etherbone", action="store_true", help="enable Etherbone support")
     builder_args(parser)
-    soc_core_args(parser)
+    soc_sdram_args(parser)
     args = parser.parse_args()
-
+    
     soc = BaseSoC()
+
     builder = Builder(soc, **builder_argdict(args))
     builder.build()
 
